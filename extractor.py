@@ -1,6 +1,18 @@
 import fitz  # PyMuPDF
 import json
 from datetime import datetime
+import os
+from dotenv import load_dotenv
+import google.generativeai as genai
+
+
+# Load environment variables
+load_dotenv()
+api_key = os.getenv("GEMINI_API_KEY")
+
+if not api_key:
+    raise ValueError("❌ GEMINI_API_KEY not found in .env file!")
+
 
 # Open the PDF
 doc = fitz.open("Form ADT-1-29092023_signed.pdf")
@@ -15,7 +27,7 @@ for page in doc:
 # Extract only the text part
 texts = [block[4].strip() for block in all_blocks if block[4].strip()]
 
-print("--------------text: ", texts)
+# print("--------------text: ", texts)
 
 # Define label → field map
 field_map = {
@@ -36,13 +48,19 @@ data = {value: "" for value in field_map.values()}
 for i, text in enumerate(texts):
     for label, field in field_map.items():
         if label.lower() in text.lower():
-            # Check the next block
+            # Special handling for CIN → always take the previous block
+            if field == "cin" and i - 1 >= 0:
+                prev_val = texts[i - 1]
+                if not any(lbl.lower() in prev_val.lower() for lbl in field_map.keys()):
+                    data[field] = prev_val.strip().split("\n")[-1].strip()
+                continue  # Skip rest of this iteration
+
+            # For all other fields: check next, fallback to previous
             if i + 1 < len(texts):
                 next_val = texts[i + 1]
                 if not any(lbl.lower() in next_val.lower() for lbl in field_map.keys()):
                     data[field] = next_val.strip()
                     continue
-            # Check the previous block
             if i - 1 >= 0:
                 prev_val = texts[i - 1]
                 if not any(lbl.lower() in prev_val.lower() for lbl in field_map.keys()):
@@ -59,3 +77,35 @@ with open("output.json", "w") as f:
     json.dump(data, f, indent=2)
 
 print("✅ Structured data saved to output.json")
+
+
+# Configure Gemini
+genai.configure(api_key=api_key)
+model = genai.GenerativeModel("gemini-2.0-flash")
+
+# Load extracted data
+with open("output.json", "r") as f:
+    data = json.load(f)
+
+# Create prompt
+prompt = f"""
+Generate a plain-English summary in 2 to 5 lines of the following Form ADT-1 data. Be concise and clear.
+For reference here is and example: “XYZ Pvt Ltd has appointed M/s Rao & Associates as its statutory auditor for FY 2023–24, effective from 1 July 2023. The appointment has been disclosed via Form ADT-1, with all supporting documents submitted.”
+
+Company Name: {data['company_name']}
+CIN: {data['cin']}
+Auditor Name: {data['auditor_name']}
+Auditor FRN: {data['auditor_frn_or_membership']}
+Auditor Address: {data['auditor_address']}
+Appointment Date: {data['appointment_date']}
+Appointment Type: {data['appointment_type']}
+"""
+
+# Generate summary
+response = model.generate_content(prompt)
+
+# Save summary
+with open("summary.txt", "w") as f:
+    f.write(response.text.strip())
+
+print("✅ summary.txt generated using Gemini.")
